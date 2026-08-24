@@ -1,0 +1,208 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EcoScheduler Master Account Resources - IAM Roles and Policies'
+
+Resources:
+  # IAM Role for Lambda Functions
+  EcoSchedulerServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: EcoScheduler-Service-Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+      - PolicyName: EcoSchedulerCrossAccountAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Resource: 'arn:aws:iam::*:role/EcoScheduler-CrossAccount-Role'
+      - PolicyName: EcoSchedulerDynamoDBAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+            - dynamodb:Query
+            - dynamodb:Scan
+            - dynamodb:BatchGetItem
+            - dynamodb:BatchWriteItem
+            Resource:
+            - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/EcoScheduler-*'
+            - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/EcoScheduler-*/index/*'
+      - PolicyName: EcoSchedulerEventBridgeAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - events:DescribeRule
+            - events:PutRule
+            - events:DeleteRule
+            - events:PutTargets
+            - events:RemoveTargets
+            - events:EnableRule
+            - events:DisableRule
+            - events:ListRules
+            Resource: '*'
+      - PolicyName: EcoSchedulerLambdaInvoke
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: lambda:InvokeFunction
+            Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:EcoScheduler-*'
+
+  # IAM Role for API Gateway
+  EcoSchedulerApiGatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: EcoScheduler-ApiGateway-Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: apigateway.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+      Policies:
+      - PolicyName: EcoSchedulerLambdaInvoke
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: lambda:InvokeFunction
+            Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:EcoScheduler-*'
+
+  # Admin User with CloudFormation and S3 Permissions
+  EcoSchedulerAdminUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: EcoScheduler-Admin
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+      - arn:aws:iam::aws:policy/AmazonAPIGatewayAdministrator
+      - arn:aws:iam::aws:policy/AWSLambda_FullAccess
+      - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+      - arn:aws:iam::aws:policy/AWSCloudFormationReadOnlyAccess
+      Policies:
+      - PolicyName: EcoSchedulerCloudFormationAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - cloudformation:CreateStack
+            - cloudformation:CreateChangeSet
+            - cloudformation:UpdateStack
+            - cloudformation:DeleteStack
+            - cloudformation:Describe*
+            - cloudformation:List*
+            - cloudformation:ExecuteChangeSet
+            - cloudformation:DeleteChangeSet
+            Resource: "arn:aws:cloudformation:us-east-1:637423590778:stack/eco-scheduler-dev/*"
+      - PolicyName: EcoSchedulerS3DeploymentAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:CreateBucket
+            - s3:PutBucketPolicy
+            - s3:DeleteBucket
+            - s3:PutBucketTagging
+            - s3:ListBucket
+            - s3:GetBucketLocation
+            - s3:PutObject
+            - s3:GetObject
+            - s3:DeleteObject
+            - s3:DeleteBucketPolicy
+            - s3:PutEncryptionConfiguration
+            Resource:
+            - "arn:aws:s3:::eco-scheduler-dev-serverlessdeploymentbucket-*"
+            - "arn:aws:s3:::eco-scheduler-dev-serverlessdeploymentbucket-*/*"
+      - PolicyName: EcoSchedulerIAMAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - iam:CreatePolicy
+            - iam:CreateRole
+            - iam:AttachRolePolicy
+            - iam:DetachRolePolicy
+            - iam:DeleteRole
+            - iam:DeletePolicy
+            - iam:PutRolePolicy
+            - iam:DeleteRolePolicy
+            - iam:GetRole
+            - iam:GetPolicy
+            Resource: "*"
+      - PolicyName: EcoSchedulerEventBridgeAdminAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - events:PutRule
+            - events:DescribeRule
+            - events:DeleteRule
+            - events:PutTargets
+            - events:RemoveTargets
+            - events:EnableRule
+            - events:DisableRule
+            - events:ListRules
+            - events:ListTargetsByRule
+            - events:TagResource
+            - events:UntagResource
+            - events:ListTagsForResource
+            Resource: "*"
+      - PolicyName: EcoSchedulerIAMTaggingAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - iam:TagRole
+            - iam:UntagRole
+            - iam:ListRoleTags
+            Resource: "arn:aws:iam::637423590778:role/eco-scheduler-dev-*"
+  # Access Key for Admin User
+  EcoSchedulerAdminUserAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref EcoSchedulerAdminUser
+
+Outputs:
+  ServiceRoleArn:
+    Description: ARN of the EcoScheduler Service Role
+    Value: !GetAtt EcoSchedulerServiceRole.Arn
+    Export:
+      Name: EcoSchedulerServiceRoleArn
+
+  ApiGatewayRoleArn:
+    Description: ARN of the EcoScheduler API Gateway Role
+    Value: !GetAtt EcoSchedulerApiGatewayRole.Arn
+    Export:
+      Name: EcoSchedulerApiGatewayRoleArn
+
+  AdminUserAccessKey:
+    Description: Access Key for EcoScheduler Admin User
+    Value: !Ref EcoSchedulerAdminUserAccessKey
+
+  AdminUserSecretKey:
+    Description: Secret Key for EcoScheduler Admin User
+    Value: !GetAtt EcoSchedulerAdminUserAccessKey.SecretAccessKey

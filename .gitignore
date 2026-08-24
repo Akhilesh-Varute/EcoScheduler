@@ -1,0 +1,26 @@
+# Claude Code local tool state (not project source)
+.claude/
+
+# Backend (Python / Serverless Framework)
+backend/node_modules/
+backend/.serverless/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/.pytest_cache/
+backend/venv/
+backend/env/
+backend/.env
+backend/*.pyc
+
+# Frontend (Next.js) - frontend/.gitignore already covers this too,
+# duplicated here for clarity when browsing the repo root
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env*.local
+frontend/*.tsbuildinfo
+frontend/next-env.d.ts
+
+# OS junk
+.DS_Store
+Thumbs.db

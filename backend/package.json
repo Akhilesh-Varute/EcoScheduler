@@ -1,0 +1,39 @@
+{
+    "name": "eco-scheduler-backend",
+    "version": "1.0.0",
+    "description": "AWS EC2 Cost Optimization Tool",
+    "type": "commonjs",
+    "engines": {
+        "node": ">=20",
+        "npm": ">=9"
+    },
+    "scripts": {
+        "test": "pytest",
+        "lint": "flake8 src",
+        "format": "black src",
+        "sls": "serverless",
+        "deploy:dev": "serverless deploy --stage dev",
+        "deploy:prod": "serverless deploy --stage prod",
+        "remove:dev": "serverless remove --stage dev",
+        "remove:prod": "serverless remove --stage prod",
+        "offline": "serverless offline start",
+        "dynamodb:install": "serverless dynamodb install",
+        "dynamodb:start": "serverless dynamodb start --migrate",
+        "create-admin": "python ./scripts/create_admin_user.py"
+    },
+    "keywords": [
+        "aws",
+        "ec2",
+        "cost-optimization",
+        "serverless"
+    ],
+    "author": "",
+    "license": "MIT",
+    "devDependencies": {
+        "serverless": "^3.40.0",
+        "serverless-dynamodb-local": "^0.2.40",
+        "serverless-iam-roles-per-function": "^3.2.0",
+        "serverless-offline": "^13.3.3",
+        "serverless-python-requirements": "^6.0.1"
+    }
+}

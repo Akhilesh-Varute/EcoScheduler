@@ -1,0 +1,137 @@
+Resources:
+  CommonLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: ${self:service}-common-${self:provider.stage}
+      Description: Common code for EcoScheduler functions
+      CompatibleRuntimes:
+      - python3.10
+      Content:
+        S3Bucket: ${self:custom.layerBucket}
+        S3Key: ${self:service}/${self:provider.stage}/common-layer.zip
+      RetentionPolicy: Retain
+
+  # Add this layer to all functions
+  FunctionLayers:
+    Type: Custom::LambdaLayers
+    DependsOn: CommonLayer
+    Properties:
+      ServiceToken: !GetAtt CommonLayerLambda.Arn
+      LambdaFunctions:
+      - JwtAuthorizer
+      - Login
+      - Register
+      - GetUser
+      - UpdateUser
+      - CreateSchedule
+      - GetSchedule
+      - ListSchedules
+      - UpdateSchedule
+      - DeleteSchedule
+      - EC2Start
+      - EC2Stop
+      - EC2List
+      - CalculateSavings
+      - SavingsReport
+      LayerArn: !Ref CommonLayer
+
+  # Custom resource to attach layers to functions
+  CommonLayerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Runtime: python3.10
+      Timeout: 60
+      Role: !GetAtt CommonLayerLambdaRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import os
+
+          def handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete':
+                      return cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                  
+                  # Get Lambda client
+                  lambda_client = boto3.client('lambda')
+                  
+                  # Get layer ARN from event
+                  layer_arn = event['ResourceProperties']['LayerArn']
+                  
+                  # Get functions to update
+                  functions = event['ResourceProperties']['LambdaFunctions']
+                  
+                  # Update each function
+                  for function_name in functions:
+                      # Get function full name
+                      full_function_name = f"{os.environ['SERVICE_NAME']}-{os.environ['STAGE']}-{function_name}"
+                      
+                      try:
+                          # Get current function config
+                          config = lambda_client.get_function_configuration(
+                              FunctionName=full_function_name
+                          )
+                          
+                          # Get current layers
+                          current_layers = config.get('Layers', [])
+                          current_layer_arns = [layer['Arn'] for layer in current_layers]
+                          
+                          # Skip if layer already attached
+                          if layer_arn in current_layer_arns:
+                              continue
+                          
+                          # Add layer to function
+                          lambda_client.update_function_configuration(
+                              FunctionName=full_function_name,
+                              Layers=current_layer_arns + [layer_arn]
+                          )
+                          
+                          print(f"Added layer to {full_function_name}")
+                      except Exception as e:
+                          print(f"Error updating function {full_function_name}: {str(e)}")
+                  
+                  # Success
+                  return cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                      'Message': 'Layers attached to functions successfully'
+                  })
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  return cfnresponse.send(event, context, cfnresponse.FAILED, {
+                      'Error': str(e)
+                  })
+      Environment:
+        Variables:
+          SERVICE_NAME: ${self:service}
+          STAGE: ${self:provider.stage}
+
+  CommonLayerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+      - PolicyName: LambdaUpdatePolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - lambda:GetFunctionConfiguration
+            - lambda:UpdateFunctionConfiguration
+            Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${self:service}-${self:provider.stage}-*"
+
+Outputs:
+  CommonLayerArn:
+    Description: ARN of the common layer
+    Value: !Ref CommonLayer
+    Export:
+      Name: ${self:service}-${self:provider.stage}-common-layer

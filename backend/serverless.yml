@@ -1,0 +1,606 @@
+service: eco-scheduler
+
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: python3.10
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'us-east-1'}
+  memorySize: 256
+  timeout: 30
+  environment:
+    USERS_TABLE: ${self:service}-users-${self:provider.stage}
+    SCHEDULES_TABLE: ${self:service}-schedules-${self:provider.stage}
+    SAVINGS_TABLE: ${self:service}-savings-${self:provider.stage}
+    EXCEPTIONS_TABLE: ${self:service}-exceptions-${self:provider.stage}
+    AUDIT_LOGS_TABLE: ${self:service}-audit-logs-${self:provider.stage}
+    JWT_SECRET_KEY: ${self:custom.jwtSecret}
+    CROSS_ACCOUNT_ROLE: EcoScheduler-CrossAccount-Role
+    # Remove circular dependencies
+    # Instead of using GetAtt, use string interpolation that will be resolved after deployment
+    EC2_START_LAMBDA_NAME: ${self:service}-${self:provider.stage}-EC2Start
+    EC2_STOP_LAMBDA_NAME: ${self:service}-${self:provider.stage}-EC2Stop
+    SUBSCRIPTIONS_TABLE: ${self:service}-subscriptions-${self:provider.stage}
+    STRIPE_SECRET_KEY: ${env:STRIPE_SECRET_KEY, ''}
+    STRIPE_WEBHOOK_SECRET: ${env:STRIPE_WEBHOOK_SECRET, ''}
+    STRIPE_SUCCESS_URL: ${env:STRIPE_SUCCESS_URL, 'https://your-domain.com/billing/success'}
+    STRIPE_CANCEL_URL: ${env:STRIPE_CANCEL_URL, 'https://your-domain.com/billing/cancel'}
+    # Stripe product/price IDs
+    STRIPE_STARTER_MONTHLY_PRICE_ID: ${env:STRIPE_STARTER_MONTHLY_PRICE_ID, ''}
+    STRIPE_STARTER_ANNUAL_PRICE_ID: ${env:STRIPE_STARTER_ANNUAL_PRICE_ID, ''}
+    STRIPE_BUSINESS_MONTHLY_PRICE_ID: ${env:STRIPE_BUSINESS_MONTHLY_PRICE_ID, ''}
+    STRIPE_BUSINESS_ANNUAL_PRICE_ID: ${env:STRIPE_BUSINESS_ANNUAL_PRICE_ID, ''}
+    STRIPE_ENTERPRISE_MONTHLY_PRICE_ID: ${env:STRIPE_ENTERPRISE_MONTHLY_PRICE_ID, ''}
+    STRIPE_ENTERPRISE_ANNUAL_PRICE_ID: ${env:STRIPE_ENTERPRISE_ANNUAL_PRICE_ID, ''}
+
+  iam:
+    role:
+      statements:
+      - Effect: Allow
+        Action:
+        - dynamodb:Query
+        - dynamodb:Scan
+        - dynamodb:GetItem
+        - dynamodb:PutItem
+        - dynamodb:UpdateItem
+        - dynamodb:DeleteItem
+        - dynamodb:BatchGetItem
+        Resource:
+        - !GetAtt UsersTable.Arn
+        - !GetAtt SchedulesTable.Arn
+        - !GetAtt SavingsTable.Arn
+        - !GetAtt ExceptionsTable.Arn
+        - !GetAtt SubscriptionsTable.Arn
+        - !GetAtt AuditLogsTable.Arn
+        - !Join [ '', [ !GetAtt UsersTable.Arn, '/index/*' ] ]
+        - !Join [ '', [ !GetAtt SchedulesTable.Arn, '/index/*' ] ]
+        - !Join [ '', [ !GetAtt SavingsTable.Arn, '/index/*' ] ]
+        - !Join [ '', [ !GetAtt ExceptionsTable.Arn, '/index/*' ] ]
+        - !Join [ '', [ !GetAtt SubscriptionsTable.Arn, '/index/*' ] ]
+        - !Join [ '', [ !GetAtt AuditLogsTable.Arn, '/index/*' ] ]
+      - Effect: Allow
+        Action:
+        - sts:AssumeRole
+        Resource: 'arn:aws:iam::*:role/EcoScheduler-CrossAccount-Role'
+      - Effect: Allow
+        Action:
+        - events:PutRule
+        - events:DeleteRule
+        - events:PutTargets
+        - events:RemoveTargets
+        - events:DisableRule
+        - events:EnableRule
+        - events:ListRules
+        Resource: '*'
+      - Effect: Allow
+        Action:
+        - lambda:InvokeFunction
+        - lambda:AddPermission
+        - lambda:GetPolicy
+        Resource: '*'
+
+custom:
+  jwtSecret: ${env:JWT_SECRET_KEY}
+  pythonRequirements:
+    dockerizePip: false # Set to false to avoid Docker dependency
+    slim: true
+  apiGateway:
+    minimumCompressionSize: 1024
+    shouldStartNameWithService: true
+  dynamodb:
+    stages:
+    - dev
+    start:
+      migrate: true
+      seed: true
+
+package:
+  individually: true
+  patterns:
+  - '!node_modules/**'
+  - '!.vscode/**'
+  - '!.serverless/**'
+  - '!.github/**'
+  - '!.pytest_cache/**'
+  - '!__pycache__/**'
+  - '!.git/**'
+  - '!tests/**'
+  - '!frontend/**'
+
+functions:
+  # Authentication Functions
+  JwtAuthorizer:
+    handler: src/functions/auth/authorizer.handler
+
+  Login:
+    handler: src/functions/auth/login.handler
+    events:
+    - http:
+        path: /auth/login
+        method: post
+        cors: true
+
+  Register:
+    handler: src/functions/users/create.handler
+    events:
+    - http:
+        path: /auth/register
+        method: post
+        cors: true
+
+  RefreshToken:
+    handler: src/functions/auth/refresh.handler
+    events:
+    - http:
+        path: /auth/refresh
+        method: post
+        cors: true
+        authorizer:
+          name: JwtAuthorizer
+          type: token
+          identitySource: method.request.header.Authorization
+
+  # User Functions
+  GetUser:
+    handler: src/functions/users/get.handler
+    events:
+    - http:
+        path: /users/me
+        method: get
+        cors: true
+        authorizer:
+          name: JwtAuthorizer
+          type: token
+          identitySource: method.request.header.Authorization
+
+  GetUserById:
+    handler: src/functions/users/get.handler
+    events:
+    - http:
+        path: /users/{userId}
+        method: get
+        cors: true
+        authorizer:
+          name: JwtAuthorizer
+          type: token
+          identitySource: method.request.header.Authorization
+
+  UpdateUser:
+    handler: src/functions/users/update.handler
+    events:
+    - http:
+        path: /users/{userId}
+        method: put
+        cors: true
+        authorizer:
+          name: JwtAuthorizer
+          type: token
+          identitySource: method.request.header.Authorization
+
+  # Schedule Functions
+  CreateSchedule:
+    handler: src/functions/schedules/create.handler
+    events:
+    - http:
+        path: /schedules
+        method: post
+        cors: true
+        authorizer:
+          name: JwtAuthorizer
+          type: token
+          identitySource: method.request.header.Authorization
+
+  GetSchedule:
+    handler: src/functions/schedules/get.handler
+    events:
+    - http:
+        path: /schedules/{scheduleId}
+        method: get
+        cors: true
+        authorizer:
+          name: JwtAuthorizer
+          type: token
+          identitySource: method.request.header.Authorization
+
+  ListSchedules:
+    handler: src/functions/schedules/list.handler
+    events:
+    - http:
+        path: /schedules
+        method: get
+        cors: true
+        authorizer:
+          name: JwtAuthorizer
+          type: token
+          identitySource: method.request.header.Authorization
+
+  UpdateSchedule:
+    handler: src/functions/schedules/update.handler
+    events:
+    - http:
+        path: /schedules/{scheduleId}
+        method: put
+        cors: true
+        authorizer:
+          name: JwtAuthorizer
+          type: token
+          identitySource: method.request.header.Authorization
+
+  DeleteSchedule:
+    handler: src/functions/schedules/delete.handler
+    events:
+    - http:
+        path: /schedules/{scheduleId}
+        method: delete
+        cors: true
+        authorizer:
+          name: JwtAuthorizer
+          type: token
+          identitySource: method.request.header.Authorization
+
+  # EC2 Control Functions
+  EC2Start:
+    handler: src/functions/ec2/start.handler
+    events:
+    - http:
+        path: /ec2/start
+        method: post
+        cors: true
+        authorizer:
+          name: JwtAuthorizer
+          type: token
+          identitySource: method.request.header.Authorization
+
+  EC2Stop:
+    handler: src/functions/ec2/stop.handler
+    events:
+    - http:
+        path: /ec2/stop
+        method: post
+        cors: true
+        authorizer:
+          name: JwtAuthorizer
+          type: token
+          identitySource: method.request.header.Authorization
+
+  EC2List:
+    handler: src/functions/ec2/list.handler
+    events:
+    - http:
+        path: /ec2/list
+        method: get
+        cors: true
+        authorizer:
+          name: JwtAuthorizer
+          type: token
+          identitySource: method.request.header.Authorization
+
+  # Savings Functions
+  CalculateSavings:
+    handler: src/functions/savings/calculate.handler
+    events:
+    - schedule:
+        rate: cron(0 1 * * ? *) # Run daily at 1:00 UTC
+        enabled: true
+        input:
+          source: 'scheduler'
+
+  SavingsReport:
+    handler: src/functions/savings/report.handler
+    events:
+    - http:
+        path: /savings/report
+        method: get
+        cors: true
+        authorizer:
+          name: JwtAuthorizer
+          type: token
+          identitySource: method.request.header.Authorization
+
+  # Account Connection Functions
+  AccountsVerify:
+    handler: src/functions/accounts/verify.handler
+    events:
+    - http:
+        path: /accounts/verify
+        method: get
+        cors: true
+        authorizer:
+          name: JwtAuthorizer
+          type: token
+          identitySource: method.request.header.Authorization
+
+  # Audit Log Functions
+  AuditLogsList:
+    handler: src/functions/audit/list.handler
+    events:
+    - http:
+        path: /audit-logs
+        method: get
+        cors: true
+        authorizer:
+          name: JwtAuthorizer
+          type: token
+          identitySource: method.request.header.Authorization
+
+  # Subscription Functions
+  GetSubscription:
+    handler: src/functions/subscriptions/get.handler
+    events:
+    - http:
+        path: /subscriptions
+        method: get
+        cors: true
+        authorizer:
+          name: JwtAuthorizer
+          type: token
+          identitySource: method.request.header.Authorization
+
+  UpdateSubscription:
+    handler: src/functions/subscriptions/update.handler
+    events:
+    - http:
+        path: /subscriptions
+        method: put
+        cors: true
+        authorizer:
+          name: JwtAuthorizer
+          type: token
+          identitySource: method.request.header.Authorization
+
+  # Payment Functions
+  CreateCheckoutSession:
+    handler: src/functions/payments/create_checkout.handler
+    events:
+    - http:
+        path: /payments/checkout
+        method: post
+        cors: true
+        authorizer:
+          name: JwtAuthorizer
+          type: token
+          identitySource: method.request.header.Authorization
+
+resources:
+  Resources:
+    # DynamoDB Tables
+    UsersTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.USERS_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: email
+          AttributeType: S
+        KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        GlobalSecondaryIndexes:
+        - IndexName: EmailIndex
+          KeySchema:
+          - AttributeName: email
+            KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+    SchedulesTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.SCHEDULES_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+        - AttributeName: scheduleId
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: accountId
+          AttributeType: S
+        KeySchema:
+        - AttributeName: scheduleId
+          KeyType: HASH
+        GlobalSecondaryIndexes:
+        - IndexName: UserIdIndex
+          KeySchema:
+          - AttributeName: userId
+            KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: AccountIdIndex
+          KeySchema:
+          - AttributeName: accountId
+            KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+    SavingsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.SAVINGS_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+        - AttributeName: savingsId
+          AttributeType: S
+        - AttributeName: scheduleId
+          AttributeType: S
+        - AttributeName: date
+          AttributeType: S
+        KeySchema:
+        - AttributeName: savingsId
+          KeyType: HASH
+        GlobalSecondaryIndexes:
+        - IndexName: ScheduleIdIndex
+          KeySchema:
+          - AttributeName: scheduleId
+            KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: DateIndex
+          KeySchema:
+          - AttributeName: date
+            KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+    SubscriptionsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.SUBSCRIPTIONS_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+        - AttributeName: subscriptionId
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+        KeySchema:
+        - AttributeName: subscriptionId
+          KeyType: HASH
+        GlobalSecondaryIndexes:
+        - IndexName: UserIdIndex
+          KeySchema:
+          - AttributeName: userId
+            KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+    ExceptionsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.EXCEPTIONS_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+        - AttributeName: exceptionId
+          AttributeType: S
+        - AttributeName: scheduleId
+          AttributeType: S
+        - AttributeName: date
+          AttributeType: S
+        KeySchema:
+        - AttributeName: exceptionId
+          KeyType: HASH
+        GlobalSecondaryIndexes:
+        - IndexName: ScheduleIdIndex
+          KeySchema:
+          - AttributeName: scheduleId
+            KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: DateIndex
+          KeySchema:
+          - AttributeName: date
+            KeyType: HASH
+          - AttributeName: scheduleId
+            KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+    AuditLogsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.AUDIT_LOGS_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+        - AttributeName: auditId
+          AttributeType: S
+        - AttributeName: scheduleId
+          AttributeType: S
+        - AttributeName: accountId
+          AttributeType: S
+        - AttributeName: date
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+        KeySchema:
+        - AttributeName: auditId
+          KeyType: HASH
+        GlobalSecondaryIndexes:
+        - IndexName: ScheduleIdIndex
+          KeySchema:
+          - AttributeName: scheduleId
+            KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: AccountIdIndex
+          KeySchema:
+          - AttributeName: accountId
+            KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: DateIndex
+          KeySchema:
+          - AttributeName: date
+            KeyType: HASH
+          - AttributeName: timestamp
+            KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+    # API Gateway's own error responses (e.g. a custom authorizer Deny on an
+    # invalid/expired token) bypass every Lambda entirely, so they never get the
+    # CORS headers create_response() adds elsewhere. Without these, a browser
+    # sees a raw CORS failure instead of a readable 401/403 whenever a token is
+    # bad — these two resources add CORS headers to that default error path.
+    GatewayResponseDefault4XX:
+      Type: AWS::ApiGateway::GatewayResponse
+      Properties:
+        ResponseType: DEFAULT_4XX
+        RestApiId: !Ref ApiGatewayRestApi
+        ResponseParameters:
+          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+
+    GatewayResponseDefault5XX:
+      Type: AWS::ApiGateway::GatewayResponse
+      Properties:
+        ResponseType: DEFAULT_5XX
+        RestApiId: !Ref ApiGatewayRestApi
+        ResponseParameters:
+          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+
+    # More specific than DEFAULT_4XX and takes precedence for these two cases:
+    # a Lambda TOKEN authorizer returning an explicit Deny policy (ACCESS_DENIED),
+    # and a missing/malformed Authorization header (UNAUTHORIZED).
+    GatewayResponseAccessDenied:
+      Type: AWS::ApiGateway::GatewayResponse
+      Properties:
+        ResponseType: ACCESS_DENIED
+        RestApiId: !Ref ApiGatewayRestApi
+        ResponseParameters:
+          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+
+    GatewayResponseUnauthorized:
+      Type: AWS::ApiGateway::GatewayResponse
+      Properties:
+        ResponseType: UNAUTHORIZED
+        RestApiId: !Ref ApiGatewayRestApi
+        ResponseParameters:
+          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+
+    # Customer Account IAM Role Template
+    CrossAccountRoleTemplate:
+      Type: AWS::IAM::ManagedPolicy
+      Properties:
+        ManagedPolicyName: EcoScheduler-CrossAccount-Role-Template
+        Description: Template for customer accounts to create cross-account access role
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - ec2:StartInstances
+            - ec2:StopInstances
+            - ec2:DescribeInstances
+            - ec2:DescribeInstanceStatus
+            - ec2:DescribeTags
+            Resource: '*'
+
+plugins:
+- serverless-python-requirements
+- serverless-iam-roles-per-function
+- serverless-dynamodb-local
+- serverless-offline

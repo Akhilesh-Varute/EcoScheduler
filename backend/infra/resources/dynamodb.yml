@@ -1,0 +1,136 @@
+Resources:
+  # Users Table
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ${self:provider.environment.USERS_TABLE}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+      - AttributeName: userId
+        AttributeType: S
+      - AttributeName: email
+        AttributeType: S
+      KeySchema:
+      - AttributeName: userId
+        KeyType: HASH
+      GlobalSecondaryIndexes:
+      - IndexName: EmailIndex
+        KeySchema:
+        - AttributeName: email
+          KeyType: HASH
+        Projection:
+          ProjectionType: ALL
+
+  # Schedules Table
+  SchedulesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ${self:provider.environment.SCHEDULES_TABLE}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+      - AttributeName: scheduleId
+        AttributeType: S
+      - AttributeName: userId
+        AttributeType: S
+      - AttributeName: accountId
+        AttributeType: S
+      KeySchema:
+      - AttributeName: scheduleId
+        KeyType: HASH
+      GlobalSecondaryIndexes:
+      - IndexName: UserIdIndex
+        KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        Projection:
+          ProjectionType: ALL
+      - IndexName: AccountIdIndex
+        KeySchema:
+        - AttributeName: accountId
+          KeyType: HASH
+        Projection:
+          ProjectionType: ALL
+
+  # Savings Table
+  SavingsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ${self:provider.environment.SAVINGS_TABLE}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+      - AttributeName: savingsId
+        AttributeType: S
+      - AttributeName: scheduleId
+        AttributeType: S
+      - AttributeName: date
+        AttributeType: S
+      KeySchema:
+      - AttributeName: savingsId
+        KeyType: HASH
+      GlobalSecondaryIndexes:
+      - IndexName: ScheduleIdIndex
+        KeySchema:
+        - AttributeName: scheduleId
+          KeyType: HASH
+        Projection:
+          ProjectionType: ALL
+      - IndexName: DateIndex
+        KeySchema:
+        - AttributeName: date
+          KeyType: HASH
+        Projection:
+          ProjectionType: ALL
+
+  # Exceptions Table
+  ExceptionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ${self:provider.environment.EXCEPTIONS_TABLE}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+      - AttributeName: exceptionId
+        AttributeType: S
+      - AttributeName: scheduleId
+        AttributeType: S
+      - AttributeName: date
+        AttributeType: S
+      KeySchema:
+      - AttributeName: exceptionId
+        KeyType: HASH
+      GlobalSecondaryIndexes:
+      - IndexName: ScheduleIdIndex
+        KeySchema:
+        - AttributeName: scheduleId
+          KeyType: HASH
+        Projection:
+          ProjectionType: ALL
+      - IndexName: DateIndex
+        KeySchema:
+        - AttributeName: date
+          KeyType: HASH
+        - AttributeName: scheduleId
+          KeyType: RANGE
+        Projection:
+          ProjectionType: ALL
+
+  # Subscriptions Table
+  SubscriptionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ${self:provider.environment.SUBSCRIPTIONS_TABLE}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+      - AttributeName: subscriptionId
+        AttributeType: S
+      - AttributeName: userId
+        AttributeType: S
+      KeySchema:
+      - AttributeName: subscriptionId
+        KeyType: HASH
+      GlobalSecondaryIndexes:
+      - IndexName: UserIdIndex
+        KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        Projection:
+          ProjectionType: ALL

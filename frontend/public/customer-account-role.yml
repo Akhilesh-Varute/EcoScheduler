@@ -1,0 +1,68 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EcoScheduler Customer Account Resources - Cross-Account Role'
+
+Parameters:
+  MasterAccountId:
+    Type: String
+    Description: The AWS Account ID of the EcoScheduler master account
+    AllowedPattern: '^[0-9]{12}$'
+    ConstraintDescription: Must be a valid 12-digit AWS account ID
+  LambdaRoleName:
+    Type: String
+    Description: >-
+      Name of the IAM role EcoScheduler's Lambda functions actually run under
+      in the master account. NOTE: this is Serverless Framework's own
+      auto-generated execution role (${service}-${stage}-${region}-lambdaRole),
+      not the EcoScheduler-Service-Role defined in master-account.yml -- that
+      role isn't wired to any function via provider.iam.role, so it's not the
+      real caller. Defaults to the dev stage's role name; pass a different
+      value for other stages/regions.
+    Default: eco-scheduler-dev-us-east-1-lambdaRole
+
+Resources:
+  # Cross-Account IAM Role for EC2 Access
+  EcoSchedulerCrossAccountRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: EcoScheduler-CrossAccount-Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            AWS: !Sub 'arn:aws:iam::${MasterAccountId}:role/${LambdaRoleName}'
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: EcoSchedulerEC2Control
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - ec2:StartInstances
+            - ec2:StopInstances
+            - ec2:DescribeInstances
+            - ec2:DescribeInstanceStatus
+            - ec2:DescribeTags
+            Resource: '*'
+      - PolicyName: EcoSchedulerTagging
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - ec2:CreateTags
+            - ec2:DeleteTags
+            Resource: '*'
+            Condition:
+              ForAllValues:StringEquals:
+                aws:TagKeys:
+                - EcoScheduler-ManagedBy
+                - EcoScheduler-ScheduleId
+
+Outputs:
+  CrossAccountRoleArn:
+    Description: ARN of the EcoScheduler Cross-Account Role
+    Value: !GetAtt EcoSchedulerCrossAccountRole.Arn
+    Export:
+      Name: EcoSchedulerCrossAccountRoleArn
