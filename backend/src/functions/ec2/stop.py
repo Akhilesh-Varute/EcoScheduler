@@ -13,6 +13,9 @@ from common.utils import create_response
 from common.ec2_connector import EC2Connector
 from common.scheduler import SchedulerManager
 
+# See the matching constant in ec2/start.py for the rationale.
+AUTO_DISABLE_AFTER_CONSECUTIVE_FAILURES = 5
+
 
 def handler(event, context):
     """
@@ -257,6 +260,7 @@ def handle_schedule_event(event, context):
                     "lastStopTime": current_time,
                     "lastAction": "stop",
                     "lastActionResult": "success",
+                    "consecutiveFailures": 0,
                 },
             )
 
@@ -321,15 +325,33 @@ def handle_schedule_event(event, context):
                 "instances": result.get("stoppingInstances", []),
             }
         else:
-            # Update schedule with failure information
-            schedule_model.update_schedule(
-                schedule_id,
-                {
-                    "lastAction": "stop",
-                    "lastActionResult": "failure",
-                    "lastError": result.get("message"),
-                },
+            error_category = result.get("errorCategory", "unknown")
+            consecutive_failures = schedule.get("consecutiveFailures", 0) + 1
+
+            # See the matching comment in ec2/start.py: a "permanent" error
+            # or too many consecutive failures of any kind means this
+            # schedule is not going to recover on its own - stop letting
+            # EventBridge keep firing into it silently.
+            should_disable = (
+                error_category == "permanent"
+                or consecutive_failures >= AUTO_DISABLE_AFTER_CONSECUTIVE_FAILURES
             )
+
+            schedule_update = {
+                "lastAction": "stop",
+                "lastActionResult": "failure",
+                "lastError": result.get("message"),
+                "consecutiveFailures": consecutive_failures,
+            }
+            if should_disable:
+                schedule_update["enabled"] = False
+                schedule_update["disabledReason"] = (
+                    f"Auto-disabled after {consecutive_failures} consecutive "
+                    f"failure(s) stopping instances ({error_category}): "
+                    f"{result.get('message')}"
+                )
+
+            schedule_model.update_schedule(schedule_id, schedule_update)
 
             audit_model.record_action(
                 action="stop",
@@ -341,12 +363,26 @@ def handle_schedule_event(event, context):
                 result="failure",
                 error=result.get("message"),
             )
+            if should_disable:
+                audit_model.record_action(
+                    action="schedule_auto_disabled",
+                    trigger_type="scheduled",
+                    triggered_by="system",
+                    instance_ids=instance_ids,
+                    account_id=account_id,
+                    schedule_id=schedule_id,
+                    result="failure",
+                    error=schedule_update["disabledReason"],
+                )
 
             return {
                 "success": False,
                 "message": result.get("message"),
                 "scheduleId": schedule_id,
                 "error": result.get("error"),
+                "errorCategory": error_category,
+                "consecutiveFailures": consecutive_failures,
+                "scheduleDisabled": should_disable,
             }
 
     except Exception as e:

@@ -13,6 +13,12 @@ from common.utils import create_response
 from common.ec2_connector import EC2Connector
 from common.scheduler import SchedulerManager
 
+# After this many consecutive scheduled-run failures for the same schedule
+# (of any kind), auto-disable it rather than let EventBridge keep firing
+# into a schedule that clearly is not recovering on its own. A "permanent"
+# error (role revoked, etc) disables immediately - see handle_schedule_event.
+AUTO_DISABLE_AFTER_CONSECUTIVE_FAILURES = 5
+
 
 def handler(event, context):
     """
@@ -257,13 +263,15 @@ def handle_schedule_event(event, context):
                 schedule_id=schedule_id,
                 result="success",
             )
-            # Update schedule with latest start time
+            # Update schedule with latest start time, and reset the
+            # consecutive-failure counter now that a run has succeeded.
             schedule_model.update_schedule(
                 schedule_id,
                 {
                     "lastStartTime": current_time,
                     "lastAction": "start",
                     "lastActionResult": "success",
+                    "consecutiveFailures": 0,
                 },
             )
 
@@ -275,15 +283,37 @@ def handle_schedule_event(event, context):
                 "instances": result.get("startingInstances", []),
             }
         else:
-            # Update schedule with failure information
-            schedule_model.update_schedule(
-                schedule_id,
-                {
-                    "lastAction": "start",
-                    "lastActionResult": "failure",
-                    "lastError": result.get("message"),
-                },
+            error_category = result.get("errorCategory", "unknown")
+            consecutive_failures = schedule.get("consecutiveFailures", 0) + 1
+
+            # A "permanent" error (e.g. the customer revoked/deleted the
+            # cross-account role) will never succeed on its own no matter how
+            # many more times EventBridge fires this schedule - retrying
+            # forever just fills the audit log with the same failure. Disable
+            # the schedule so it stops silently failing, and say why. A run
+            # of repeated failures of *any* kind past the threshold gets the
+            # same treatment, in case a failure mode we didn't anticipate
+            # turns out to also never recover.
+            should_disable = (
+                error_category == "permanent"
+                or consecutive_failures >= AUTO_DISABLE_AFTER_CONSECUTIVE_FAILURES
             )
+
+            schedule_update = {
+                "lastAction": "start",
+                "lastActionResult": "failure",
+                "lastError": result.get("message"),
+                "consecutiveFailures": consecutive_failures,
+            }
+            if should_disable:
+                schedule_update["enabled"] = False
+                schedule_update["disabledReason"] = (
+                    f"Auto-disabled after {consecutive_failures} consecutive "
+                    f"failure(s) starting instances ({error_category}): "
+                    f"{result.get('message')}"
+                )
+
+            schedule_model.update_schedule(schedule_id, schedule_update)
 
             audit_model.record_action(
                 action="start",
@@ -295,12 +325,26 @@ def handle_schedule_event(event, context):
                 result="failure",
                 error=result.get("message"),
             )
+            if should_disable:
+                audit_model.record_action(
+                    action="schedule_auto_disabled",
+                    trigger_type="scheduled",
+                    triggered_by="system",
+                    instance_ids=instance_ids,
+                    account_id=account_id,
+                    schedule_id=schedule_id,
+                    result="failure",
+                    error=schedule_update["disabledReason"],
+                )
 
             return {
                 "success": False,
                 "message": result.get("message"),
                 "scheduleId": schedule_id,
                 "error": result.get("error"),
+                "errorCategory": error_category,
+                "consecutiveFailures": consecutive_failures,
+                "scheduleDisabled": should_disable,
             }
 
     except Exception as e:

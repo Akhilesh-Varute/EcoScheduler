@@ -6,6 +6,47 @@ import os
 
 from .utils import assume_role, get_instance_price, parse_aws_arn
 
+# Error codes where retrying will not help: the customer needs to fix
+# something on their end (role deleted/trust policy wrong, instance really
+# doesn't exist, etc). No amount of backoff changes the outcome.
+PERMANENT_ERROR_CODES = {
+    "AccessDenied",
+    "AccessDeniedException",
+    "UnauthorizedOperation",
+    "InvalidClientTokenId",
+    "AuthFailure",
+    "InvalidInstanceID.NotFound",
+}
+
+# Error codes worth a short retry: transient AWS-side conditions that
+# often clear up within a few seconds.
+TRANSIENT_ERROR_CODES = {
+    "Throttling",
+    "ThrottlingException",
+    "RequestLimitExceeded",
+    "InternalError",
+    "InternalFailure",
+    "ServiceUnavailable",
+    "RequestTimeout",
+}
+
+MAX_ATTEMPTS = 3
+RETRY_BASE_DELAY_SECONDS = 1
+
+
+def classify_error(error_code: str) -> str:
+    """
+    Sort an AWS error code into "permanent" (retrying will not help - the
+    customer needs to fix something), "transient" (worth a short retry),
+    or "unknown" (an error code we have not seen before - treated the same
+    as permanent, i.e. fail fast rather than guess it is safe to retry).
+    """
+    if error_code in PERMANENT_ERROR_CODES:
+        return "permanent"
+    if error_code in TRANSIENT_ERROR_CODES:
+        return "transient"
+    return "unknown"
+
 
 class EC2Connector:
     """
@@ -38,116 +79,182 @@ class EC2Connector:
         # Refresh if no credentials or they expire within 5 minutes
         if self.credentials is None or self.credential_expiry < current_time + 300:
 
-            try:
-                self.credentials = assume_role(
-                    account_id=self.account_id, role_name=self.role_name
-                )
+            self.credentials = assume_role(
+                account_id=self.account_id, role_name=self.role_name
+            )
 
-                # Store expiry time
-                if isinstance(self.credentials.get("expiration"), int):
-                    self.credential_expiry = self.credentials["expiration"]
-                else:
-                    # Default to 1 hour from now if expiration not provided as timestamp
-                    self.credential_expiry = current_time + 3600
+            # Store expiry time
+            if isinstance(self.credentials.get("expiration"), int):
+                self.credential_expiry = self.credentials["expiration"]
+            else:
+                # Default to 1 hour from now if expiration not provided as timestamp
+                self.credential_expiry = current_time + 3600
 
-                # Create EC2 client with new credentials
-                self.ec2_client = boto3.client(
-                    "ec2",
-                    region_name=self.region,
-                    aws_access_key_id=self.credentials["aws_access_key_id"],
-                    aws_secret_access_key=self.credentials["aws_secret_access_key"],
-                    aws_session_token=self.credentials["aws_session_token"],
-                )
-
-            except Exception as e:
-                print(
-                    f"Error refreshing credentials for account {self.account_id}: {str(e)}"
-                )
-                raise Exception(
-                    f"Failed to assume role in account {self.account_id}: {str(e)}"
-                )
+            # Create EC2 client with new credentials
+            self.ec2_client = boto3.client(
+                "ec2",
+                region_name=self.region,
+                aws_access_key_id=self.credentials["aws_access_key_id"],
+                aws_secret_access_key=self.credentials["aws_secret_access_key"],
+                aws_session_token=self.credentials["aws_session_token"],
+            )
 
     def _credentials_error(self) -> Optional[Dict[str, Any]]:
         """
-        Attempt to refresh cross-account credentials, returning a clean
-        {"success": False, ...} dict if that fails (e.g. the customer never
-        deployed EcoScheduler-CrossAccount-Role in their account) instead of
+        Attempt to refresh cross-account credentials, retrying a bounded
+        number of times if STS itself reports a transient error (e.g. it is
+        throttling us), and returning a clean {"success": False, ...} dict if
+        that still fails - e.g. the customer never deployed
+        EcoScheduler-CrossAccount-Role, or deleted/narrowed it - instead of
         letting the exception propagate as an opaque 500 to the caller.
 
         Returns:
             Optional[Dict]: error response if credentials could not be obtained, else None
         """
-        try:
-            self._refresh_credentials_if_needed()
-            return None
-        except Exception as e:
-            return {
-                "success": False,
-                "message": (
-                    f"Could not access AWS account {self.account_id}. "
-                    f"Make sure the EcoScheduler-CrossAccount-Role has been "
-                    f"deployed in that account (see the account setup guide)."
-                ),
-                "error": str(e),
-            }
+        last_error: Optional[Exception] = None
+        last_category = "unknown"
+
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                self._refresh_credentials_if_needed()
+                return None
+            except ClientError as e:
+                last_error = e
+                error_code = e.response.get("Error", {}).get("Code", "")
+                last_category = classify_error(error_code)
+            except Exception as e:
+                last_error = e
+                last_category = "unknown"
+
+            if last_category != "transient" or attempt == MAX_ATTEMPTS:
+                break
+
+            print(
+                f"Transient error assuming role in account {self.account_id} "
+                f"(attempt {attempt}/{MAX_ATTEMPTS}), retrying: {str(last_error)}"
+            )
+            time.sleep(RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)))
+
+        print(
+            f"Error refreshing credentials for account {self.account_id} "
+            f"[{last_category}]: {str(last_error)}"
+        )
+        return {
+            "success": False,
+            "message": (
+                f"Could not access AWS account {self.account_id}. "
+                f"Make sure the EcoScheduler-CrossAccount-Role has been "
+                f"deployed in that account (see the account setup guide)."
+            ),
+            "error": str(last_error),
+            "errorCategory": last_category,
+        }
+
+    def _call_ec2_with_retry(self, operation_name: str, api_call, success_fields: Dict[str, str]) -> Dict[str, Any]:
+        """
+        Call an EC2 API operation, retrying a bounded number of times on
+        transient AWS errors (throttling, internal errors) with a short
+        exponential backoff, and failing fast (no retry) on permanent errors
+        like AccessDenied or an instance ID that genuinely doesn't exist -
+        retrying those just burns Lambda time for the same result.
+
+        Args:
+            operation_name: human-readable name for log/error messages (e.g. "starting instances")
+            api_call: zero-arg callable that makes the boto3 EC2 API call and returns its response
+            success_fields: extra {resultKey: responseKey} pairs to copy from the API response into the success dict
+
+        Returns:
+            Dict: {"success": True, ...success_fields} or
+                  {"success": False, "message", "error", "errorCategory", "attempts"}
+        """
+        last_error: Optional[ClientError] = None
+        last_category = "unknown"
+
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                response = api_call()
+                result: Dict[str, Any] = {"success": True}
+                for result_key, response_key in success_fields.items():
+                    result[result_key] = response.get(response_key, [])
+                return result
+            except ClientError as e:
+                last_error = e
+                error_code = e.response.get("Error", {}).get("Code", "")
+                last_category = classify_error(error_code)
+
+                if last_category != "transient" or attempt == MAX_ATTEMPTS:
+                    error_message = e.response.get("Error", {}).get("Message", str(e))
+                    return {
+                        "success": False,
+                        "message": f"Error {operation_name}: {error_message}",
+                        "error": str(e),
+                        "errorCategory": last_category,
+                        "attempts": attempt,
+                    }
+
+                print(
+                    f"Transient error {operation_name} for account {self.account_id} "
+                    f"(attempt {attempt}/{MAX_ATTEMPTS}), retrying: {error_code}"
+                )
+                time.sleep(RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)))
+
+        # Unreachable in practice (the loop always returns or raises above),
+        # but keeps this method's return type honest if MAX_ATTEMPTS is 0.
+        return {
+            "success": False,
+            "message": f"Error {operation_name}: {str(last_error)}",
+            "error": str(last_error),
+            "errorCategory": last_category,
+            "attempts": MAX_ATTEMPTS,
+        }
 
     def start_instances(self, instance_ids: List[str]) -> Dict[str, Any]:
         """
-        Start EC2 instances
+        Start EC2 instances, retrying transient AWS errors with backoff.
 
         Args:
             instance_ids: List of EC2 instance IDs
 
         Returns:
-            Dict: Response from start_instances API call
+            Dict: {"success": True, "message", "startingInstances"} or a
+                  failure dict with "errorCategory" ("permanent" | "transient" | "unknown")
         """
         cred_error = self._credentials_error()
         if cred_error:
             return cred_error
 
-        try:
-            response = self.ec2_client.start_instances(InstanceIds=instance_ids)
-            return {
-                "success": True,
-                "message": f"Started {len(instance_ids)} instances",
-                "startingInstances": response.get("StartingInstances", []),
-            }
-        except ClientError as e:
-            error_message = e.response["Error"]["Message"]
-            return {
-                "success": False,
-                "message": f"Error starting instances: {error_message}",
-                "error": str(e),
-            }
+        result = self._call_ec2_with_retry(
+            "starting instances",
+            lambda: self.ec2_client.start_instances(InstanceIds=instance_ids),
+            {"startingInstances": "StartingInstances"},
+        )
+        if result.get("success"):
+            result["message"] = f"Started {len(instance_ids)} instances"
+        return result
 
     def stop_instances(self, instance_ids: List[str]) -> Dict[str, Any]:
         """
-        Stop EC2 instances
+        Stop EC2 instances, retrying transient AWS errors with backoff.
 
         Args:
             instance_ids: List of EC2 instance IDs
 
         Returns:
-            Dict: Response from stop_instances API call
+            Dict: {"success": True, "message", "stoppingInstances"} or a
+                  failure dict with "errorCategory" ("permanent" | "transient" | "unknown")
         """
         cred_error = self._credentials_error()
         if cred_error:
             return cred_error
 
-        try:
-            response = self.ec2_client.stop_instances(InstanceIds=instance_ids)
-            return {
-                "success": True,
-                "message": f"Stopped {len(instance_ids)} instances",
-                "stoppingInstances": response.get("StoppingInstances", []),
-            }
-        except ClientError as e:
-            error_message = e.response["Error"]["Message"]
-            return {
-                "success": False,
-                "message": f"Error stopping instances: {error_message}",
-                "error": str(e),
-            }
+        result = self._call_ec2_with_retry(
+            "stopping instances",
+            lambda: self.ec2_client.stop_instances(InstanceIds=instance_ids),
+            {"stoppingInstances": "StoppingInstances"},
+        )
+        if result.get("success"):
+            result["message"] = f"Stopped {len(instance_ids)} instances"
+        return result
 
     def get_instance_status(self, instance_ids: List[str]) -> Dict[str, Any]:
         """

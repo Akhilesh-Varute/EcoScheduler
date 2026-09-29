@@ -200,14 +200,26 @@ All except `/auth/login` and `/auth/register` require `Authorization: Bearer <JW
 - **No automated test suite run** — ~~pytest exists in the repo but was never executed
   this session.~~ Update: the `tests/unit/*` files were actually empty stub files, not
   an unrun suite — there was nothing to execute. `tests/unit/test_auth.py` and
-  `tests/unit/test_db_models.py` now have real coverage (33 tests: role/permission
+  `tests/unit/test_db_models.py` have real coverage (33 tests: role/permission
   matrix, JWT generate/decode/expiry/tamper/wrong-secret, the `require_permission`
-  decorator, and PBKDF2 password hash/verify). `tests/integration/*` and
-  `tests/unit/test_functions.py` are still empty — they need DynamoDB/EventBridge
-  mocking (e.g. `moto`) to test the Lambda handlers and scheduler logic, which is a
-  bigger lift than the pure-function auth/hashing tests and hasn't been done yet.
+  decorator, and PBKDF2 password hash/verify). `tests/unit/test_ec2_connector.py`
+  and `tests/unit/test_functions.py` add 19 more covering the cross-account failure
+  handling below (mocked boto3/DynamoDB, no real AWS calls). `tests/integration/*`
+  is still empty.
 - **Cross-account EC2 scheduling never tested against a real second account** — only
-  dry-run and the manual API path (against a fake instance ID) were exercised.
+  dry-run and the manual API path (against a fake instance ID) were exercised. What
+  changed: `EC2Connector` now classifies every AWS error as permanent (AccessDenied,
+  bad instance ID — retrying won't help) or transient (Throttling, ServiceUnavailable
+  — worth a retry), and retries transient errors up to 3x with backoff before giving
+  up (`ec2_connector.py`: `classify_error`, `_call_ec2_with_retry`). The scheduled
+  (EventBridge-triggered) start/stop handlers track `consecutiveFailures` per
+  schedule and auto-disable it — instead of letting it fail silently forever — the
+  moment a failure is permanent, or once failures (of any kind) hit 5 in a row
+  (`AUTO_DISABLE_AFTER_CONSECUTIVE_FAILURES` in `ec2/start.py`/`ec2/stop.py`), with a
+  distinct `schedule_auto_disabled` audit log entry explaining why. This is verified
+  against mocked AWS responses, not a real second account, so the actual STS/EC2
+  error codes AWS returns for e.g. a revoked role are assumed from documentation, not
+  observed firsthand — worth confirming against a real account before relying on it.
 - **Stripe billing flow untested** — no checkout/webhook flow run, price IDs unset.
 
 ## 9. Deployment

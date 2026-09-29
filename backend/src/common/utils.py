@@ -5,6 +5,7 @@ import re
 import boto3
 import os
 from decimal import Decimal
+from botocore.exceptions import ClientError
 from croniter import croniter
 from dateutil import parser, tz
 
@@ -157,6 +158,13 @@ def assume_role(
             "aws_session_token": response["Credentials"]["SessionToken"],
             "expiration": response["Credentials"]["Expiration"],
         }
+    except ClientError:
+        # Re-raise unchanged so callers (EC2Connector) can inspect
+        # e.response["Error"]["Code"] to tell "role does not exist / trust
+        # policy denies us" (permanent - the customer needs to fix something)
+        # apart from "STS is throttling us" (transient - worth a retry).
+        print(f"Error assuming role {role_arn}")
+        raise
     except Exception as e:
         print(f"Error assuming role {role_arn}: {str(e)}")
         raise Exception(f"Failed to assume role in account {account_id}: {str(e)}")
