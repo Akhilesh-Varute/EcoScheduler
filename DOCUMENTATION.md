@@ -197,8 +197,15 @@ All except `/auth/login` and `/auth/register` require `Authorization: Bearer <JW
   `functions/auth/authorizer.py`.
 - **`require_permission` decorator unused** — enforcement is manual/inline per
   handler instead, risking drift.
-- **No automated test suite run** — pytest exists in the repo but was never executed
-  this session.
+- **No automated test suite run** — ~~pytest exists in the repo but was never executed
+  this session.~~ Update: the `tests/unit/*` files were actually empty stub files, not
+  an unrun suite — there was nothing to execute. `tests/unit/test_auth.py` and
+  `tests/unit/test_db_models.py` now have real coverage (33 tests: role/permission
+  matrix, JWT generate/decode/expiry/tamper/wrong-secret, the `require_permission`
+  decorator, and PBKDF2 password hash/verify). `tests/integration/*` and
+  `tests/unit/test_functions.py` are still empty — they need DynamoDB/EventBridge
+  mocking (e.g. `moto`) to test the Lambda handlers and scheduler logic, which is a
+  bigger lift than the pure-function auth/hashing tests and hasn't been done yet.
 - **Cross-account EC2 scheduling never tested against a real second account** — only
   dry-run and the manual API path (against a fake instance ID) were exercised.
 - **Stripe billing flow untested** — no checkout/webhook flow run, price IDs unset.

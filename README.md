@@ -65,6 +65,7 @@ frontend/
 cd backend
 npm install
 pip install -r requirements.txt
+pip install -r requirements-dev.txt  # only needed to run tests (npm test / pytest)
 
 # deploy needs a real JWT secret - no insecure default is baked in
 export JWT_SECRET_KEY=$(openssl rand -hex 32)
