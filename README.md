@@ -1,5 +1,7 @@
 # EcoScheduler
 
+[![CI](https://github.com/Akhilesh-Varute/EcoScheduler/actions/workflows/ci.yml/badge.svg)](https://github.com/Akhilesh-Varute/EcoScheduler/actions/workflows/ci.yml)
+
 **Multi-tenant AWS EC2 cost-optimization SaaS.** Lets teams schedule EC2
 instances to stop and start on a cron, across multiple customer AWS accounts,
 so nobody pays for compute sitting idle overnight or on weekends.
